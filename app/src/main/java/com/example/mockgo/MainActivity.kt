@@ -23,7 +23,8 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import org.osmdroid.config.Configuration
 import org.osmdroid.events.MapEventsReceiver
-import org.osmdroid.tileprovider.tilesource.TileSourceFactory
+import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
+import org.osmdroid.util.MapTileIndex
 import org.osmdroid.util.GeoPoint
 import org.osmdroid.views.CustomZoomButtonsController
 import org.osmdroid.views.MapView
@@ -65,7 +66,7 @@ class MainActivity : AppCompatActivity() {
 
         val root = FrameLayout(this)
         map = MapView(this).apply {
-            setTileSource(TileSourceFactory.MAPNIK)
+            setTileSource(AMAP)
             setMultiTouchControls(true)
             zoomController.setVisibility(CustomZoomButtonsController.Visibility.SHOW_AND_FADEOUT)
             controller.setZoom(5.0)
@@ -132,10 +133,11 @@ class MainActivity : AppCompatActivity() {
 
     private fun launch() {
         if (lat.isNaN()) return
+        val wgs = Gcj.toWgs84(lat, lng) // 地图上点的是国内坐标，转成 GPS 坐标再模拟
         ContextCompat.startForegroundService(this, Intent(this, MockLocationService::class.java)
             .setAction(MockLocationService.ACTION_START)
-            .putExtra(MockLocationService.EXTRA_LAT, lat)
-            .putExtra(MockLocationService.EXTRA_LNG, lng))
+            .putExtra(MockLocationService.EXTRA_LAT, wgs.first)
+            .putExtra(MockLocationService.EXTRA_LNG, wgs.second))
         refresh()
     }
 
@@ -144,7 +146,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun inputDialog() {
         val et = EditText(this).apply { hint = "纬度,经度  如 39.9042,116.4074"; setPadding(dp(24), dp(16), dp(24), dp(8)) }
-        AlertDialog.Builder(this).setTitle("输入坐标（WGS84）").setView(et)
+        AlertDialog.Builder(this).setTitle("输入坐标（高德/国内地图坐标）").setView(et)
             .setPositiveButton("确定") { _, _ ->
                 val p = et.text.toString().replace("，", ",").split(",").map { it.trim() }
                 val la = p.getOrNull(0)?.toDoubleOrNull()
@@ -169,4 +171,22 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+
+    companion object {
+        /** 高德地图瓦片（GCJ-02 坐标系）。 */
+        private val AMAP = object : OnlineTileSourceBase(
+            "AMap", 3, 18, 256, ".png",
+            arrayOf(
+                "https://webst01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7",
+                "https://webst02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7",
+                "https://webst03.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7",
+                "https://webst04.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7"
+            )
+        ) {
+            override fun getTileURLString(pMapTileIndex: Long): String =
+                baseUrl + "&x=" + MapTileIndex.getX(pMapTileIndex) +
+                        "&y=" + MapTileIndex.getY(pMapTileIndex) +
+                        "&z=" + MapTileIndex.getZoom(pMapTileIndex)
+        }
+    }
 }
