@@ -121,7 +121,7 @@ class MockLocationService : Service() {
             if (!setup()) return
             running = true
             acquireWakeLock()
-            val t = HandlerThread("mock-loc").also { it.start() }
+            val t = HandlerThread("mock-loc", android.os.Process.THREAD_PRIORITY_FOREGROUND).also { it.start() }
             thread = t
             worker = Handler(t.looper).also { it.post(tick) }
         } else {
@@ -132,7 +132,7 @@ class MockLocationService : Service() {
 
     // ---------------------------------------------------------- 提供者
 
-    /** GPS：需要卫星、高精度；网络：需要网络、粗精度。 */
+    /** GPS：需要卫星、高精度；网络：需要网络和基站、粗精度。 */
     private fun addProvider(p: String) {
         synchronized(lock) {
             try { lm.removeTestProvider(p) } catch (_: Exception) {}
@@ -140,7 +140,7 @@ class MockLocationService : Service() {
                 lm.addTestProvider(GPS, false, true, false, false, true, true, true,
                     Criteria.POWER_HIGH, Criteria.ACCURACY_FINE)
             } else {
-                lm.addTestProvider(NET, true, false, false, false, true, true, true,
+                lm.addTestProvider(NET, true, false, true, true, true, true, true,
                     Criteria.POWER_LOW, Criteria.ACCURACY_COARSE)
             }
             lm.setTestProviderEnabled(p, true)
@@ -180,7 +180,7 @@ class MockLocationService : Service() {
                 latitude = lat
                 longitude = lng
                 altitude = 50.0
-                accuracy = 3f
+                accuracy = 1f
                 speed = 0f
                 bearing = 0f
                 time = now
@@ -191,13 +191,13 @@ class MockLocationService : Service() {
                 latitude = lat
                 longitude = lng
                 altitude = 50.0
-                accuracy = 5f
+                accuracy = 2f
                 speed = 0f
                 bearing = 0f
                 time = now
                 elapsedRealtimeNanos = elapsed
             }
-            for ((p, loc) in listOf(GPS to g, NET to n)) {
+            for ((p, loc) in listOf(NET to n, GPS to g)) {
                 try {
                     lm.setTestProviderLocation(p, loc)
                 } catch (e: SecurityException) {
