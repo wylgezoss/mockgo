@@ -1,11 +1,22 @@
 package com.example.mockgo
 
 import android.Manifest
+import android.annotation.SuppressLint
 import android.content.BroadcastReceiver
 import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.Color
+import android.graphics.DashPathEffect
+import android.graphics.Paint
+import android.graphics.RectF
+import android.graphics.drawable.BitmapDrawable
+import android.graphics.drawable.Drawable
+import android.location.Location
+import android.location.LocationManager
 import android.os.Build
 import android.os.Bundle
 import android.provider.Settings
@@ -21,18 +32,21 @@ import androidx.activity.result.contract.ActivityResultContracts
 import androidx.appcompat.app.AlertDialog
 import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
+import androidx.core.location.LocationManagerCompat
+import androidx.core.os.CancellationSignal
 import org.osmdroid.config.Configuration
 import org.osmdroid.events.MapEventsReceiver
 import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
-import org.osmdroid.util.MapTileIndex
 import org.osmdroid.util.GeoPoint
+import org.osmdroid.util.MapTileIndex
 import org.osmdroid.views.CustomZoomButtonsController
 import org.osmdroid.views.MapView
 import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Marker
+import org.osmdroid.views.overlay.Polyline
 import java.io.File
 
-/** 点地图选位置（或输入坐标），然后开始 / 停止模拟。 */
+/** 点地图选位置 → 开始模拟；地图上画出模拟位置与真实位置的连线；可一键回到真实位置。 */
 class MainActivity : AppCompatActivity() {
 
     private lateinit var map: MapView
@@ -42,10 +56,25 @@ class MainActivity : AppCompatActivity() {
     private var lat = Double.NaN
     private var lng = Double.NaN
 
+    // 开始模拟时记录的“真实位置”和“模拟位置”（均为地图坐标 GCJ-02；真实位置另存一份 WGS-84 用于算距离）
+    private var realGcj: GeoPoint? = null
+    private var realWgs: DoubleArray? = null
+    private var mockGcj: GeoPoint? = null
+    private var line: Polyline? = null
+    private var realMarker: Marker? = null
+
+    private val sp by lazy { getSharedPreferences("state", MODE_PRIVATE) }
+
     private val receiver = object : BroadcastReceiver() {
         override fun onReceive(c: Context, i: Intent) {
             refresh()
             i.getStringExtra(MockLocationService.EXTRA_ERROR)?.let { showError(it) }
+            if (!MockLocationService.running) {
+                realGcj = null
+                realWgs = null
+                mockGcj = null
+            }
+            updateLine()
         }
     }
 
@@ -91,6 +120,14 @@ class MainActivity : AppCompatActivity() {
             addView(btnGo)
         }
         root.addView(bar, FrameLayout.LayoutParams(-1, -2, Gravity.BOTTOM))
+
+        val btnBack = Button(this).apply {
+            text = "回到定位"
+            setOnClickListener { backToReal() }
+        }
+        root.addView(btnBack, FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.CENTER_VERTICAL).apply {
+            rightMargin = dp(8)
+        })
         setContentView(root)
         refresh()
     }
@@ -100,11 +137,15 @@ class MainActivity : AppCompatActivity() {
         ContextCompat.registerReceiver(this, receiver, IntentFilter(MockLocationService.ACTION_STATE),
             ContextCompat.RECEIVER_NOT_EXPORTED)
         refresh()
+        if (MockLocationService.running) loadSaved()
+        updateLine()
     }
 
     override fun onStop() { unregisterReceiver(receiver); super.onStop() }
     override fun onResume() { super.onResume(); map.onResume() }
     override fun onPause() { map.onPause(); super.onPause() }
+
+    // ------------------------------------------------------------ 选点
 
     private fun select(la: Double, ln: Double) {
         lat = la; lng = ln
@@ -118,7 +159,7 @@ class MainActivity : AppCompatActivity() {
 
     private fun onGo() {
         if (MockLocationService.running) {
-            startService(Intent(this, MockLocationService::class.java).setAction(MockLocationService.ACTION_STOP))
+            stopService()
             return
         }
         if (lat.isNaN()) { toast("请先选择位置"); return }
@@ -131,15 +172,217 @@ class MainActivity : AppCompatActivity() {
         launch()
     }
 
+    private fun stopService() {
+        startService(Intent(this, MockLocationService::class.java).setAction(MockLocationService.ACTION_STOP))
+    }
+
+    /** 先取一次真实位置（此时还没开始模拟），再启动模拟服务。 */
     private fun launch() {
         if (lat.isNaN()) return
-        val wgs = Gcj.toWgs84(lat, lng) // 地图上点的是国内坐标，转成 GPS 坐标再模拟
-        ContextCompat.startForegroundService(this, Intent(this, MockLocationService::class.java)
-            .setAction(MockLocationService.ACTION_START)
-            .putExtra(MockLocationService.EXTRA_LAT, wgs.first)
-            .putExtra(MockLocationService.EXTRA_LNG, wgs.second))
-        refresh()
+        val la = lat
+        val ln = lng
+        btnGo.isEnabled = false
+        btnGo.text = "定位中…"
+        fetchReal { real ->
+            btnGo.isEnabled = true
+            if (real != null) {
+                val g = Gcj.toGcj02(real.latitude, real.longitude)
+                realGcj = GeoPoint(g.first, g.second)
+                realWgs = doubleArrayOf(real.latitude, real.longitude)
+            } else {
+                realGcj = null
+                realWgs = null
+                toast("未获取到真实位置，将不显示连线")
+            }
+            mockGcj = GeoPoint(la, ln)
+            saveState()
+
+            val wgs = Gcj.toWgs84(la, ln) // 地图上点的是国内坐标，转成 GPS 坐标再模拟
+            ContextCompat.startForegroundService(this, Intent(this, MockLocationService::class.java)
+                .setAction(MockLocationService.ACTION_START)
+                .putExtra(MockLocationService.EXTRA_LAT, wgs.first)
+                .putExtra(MockLocationService.EXTRA_LNG, wgs.second))
+            refresh()
+        }
     }
+
+    // ------------------------------------------------------------ 回到真实位置
+
+    /** 只移动视角到真实位置，不影响模拟。 */
+    private fun backToReal() {
+        if (MockLocationService.running) {
+            // 模拟期间系统定位已被替换，只能使用“开始模拟前”记录的真实位置
+            loadSaved()
+            val r = realGcj
+            if (r == null) {
+                toast("开始模拟时没有获取到真实位置，请先停止，打开系统定位后再开始")
+                return
+            }
+            updateLine()
+            focusOn(r)
+            toast("这是开始模拟时记录的真实位置")
+        } else {
+            if (!hasLocationPermission()) { toast("需要定位权限"); return }
+            toast("正在获取真实位置…")
+            fetchReal { real ->
+                if (real == null) {
+                    toast("未获取到真实位置，请确认系统定位已开启")
+                } else {
+                    val g = Gcj.toGcj02(real.latitude, real.longitude)
+                    realGcj = GeoPoint(g.first, g.second)
+                    realWgs = doubleArrayOf(real.latitude, real.longitude)
+                    updateLine()
+                    focusOn(realGcj!!)
+                }
+            }
+        }
+    }
+
+    private fun focusOn(p: GeoPoint) {
+        map.controller.setZoom(17.0)
+        map.controller.animateTo(p)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun lastKnown(lm: LocationManager): Location? =
+        listOf(LocationManager.NETWORK_PROVIDER, LocationManager.GPS_PROVIDER, LocationManager.PASSIVE_PROVIDER)
+            .mapNotNull { try { lm.getLastKnownLocation(it) } catch (_: Exception) { null } }
+            .filter { !it.isFromMockProvider }
+            .maxByOrNull { it.time }
+
+    /** 获取真实位置（最多等 4 秒，失败则用最近一次已知位置）。必须在模拟未运行时调用。 */
+    @SuppressLint("MissingPermission")
+    private fun fetchReal(cb: (Location?) -> Unit) {
+        if (!hasLocationPermission()) { cb(null); return }
+        val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        var done = false
+        val signals = ArrayList<CancellationSignal>()
+
+        fun finish(l: Location?) {
+            if (done) return
+            done = true
+            signals.forEach { try { it.cancel() } catch (_: Exception) {} }
+            val real = if (l != null && !l.isFromMockProvider) l else lastKnown(lm)
+            cb(real)
+        }
+
+        val providers = listOf(LocationManager.NETWORK_PROVIDER, LocationManager.GPS_PROVIDER)
+            .filter { try { lm.isProviderEnabled(it) } catch (_: Exception) { false } }
+        if (providers.isEmpty()) { finish(null); return }
+
+        var pending = providers.size
+        for (p in providers) {
+            val cs = CancellationSignal()
+            signals.add(cs)
+            try {
+                LocationManagerCompat.getCurrentLocation(lm, p, cs, ContextCompat.getMainExecutor(this)) { loc ->
+                    if (loc != null) {
+                        finish(loc)
+                    } else {
+                        pending--
+                        if (pending == 0) finish(null)
+                    }
+                }
+            } catch (_: Exception) {
+                pending--
+                if (pending == 0) finish(null)
+            }
+        }
+        map.postDelayed({ finish(null) }, 4000)
+    }
+
+    // ------------------------------------------------------------ 连线
+
+    private fun saveState() {
+        val r = realGcj
+        val w = realWgs
+        val m = mockGcj
+        sp.edit()
+            .putString("real", if (r != null && w != null) "${r.latitude},${r.longitude},${w[0]},${w[1]}" else "")
+            .putString("mock", if (m != null) "${m.latitude},${m.longitude}" else "")
+            .apply()
+    }
+
+    private fun loadSaved() {
+        if (realGcj == null) {
+            val p = (sp.getString("real", "") ?: "").split(",").mapNotNull { it.toDoubleOrNull() }
+            if (p.size == 4) { realGcj = GeoPoint(p[0], p[1]); realWgs = doubleArrayOf(p[2], p[3]) }
+        }
+        if (mockGcj == null) {
+            val p = (sp.getString("mock", "") ?: "").split(",").mapNotNull { it.toDoubleOrNull() }
+            if (p.size == 2) mockGcj = GeoPoint(p[0], p[1])
+        }
+    }
+
+    /** 真实位置：始终显示蓝色图标；模拟运行中再画与模拟位置的虚线并显示距离。 */
+    private fun updateLine() {
+        line?.let { map.overlays.remove(it) }
+        realMarker?.let { map.overlays.remove(it) }
+        line = null
+        realMarker = null
+
+        val r = realGcj
+        val m = mockGcj
+        if (r == null) {
+            map.invalidate()
+            return
+        }
+
+        if (MockLocationService.running && m != null) {
+            line = Polyline(map).apply {
+                setPoints(listOf(r, m))
+                outlinePaint.color = 0xFFE53935.toInt()
+                outlinePaint.strokeWidth = 6f
+                outlinePaint.pathEffect = DashPathEffect(floatArrayOf(24f, 14f), 0f)
+            }
+            map.overlays.add(line)
+        }
+        realMarker = Marker(map).apply {
+            position = r
+            icon = realIcon()
+            setAnchor(0.5f, 0.3f)
+        }
+        map.overlays.add(realMarker)
+        map.invalidate()
+
+        val w = realWgs
+        if (MockLocationService.running && m != null && w != null) {
+            val mw = Gcj.toWgs84(m.latitude, m.longitude)
+            val res = FloatArray(1)
+            Location.distanceBetween(w[0], w[1], mw.first, mw.second, res)
+            val d = res[0]
+            val dist = if (d < 1000) String.format("%.0f 米", d) else String.format("%.2f 公里", d / 1000)
+            tvCoord.text = String.format("模拟：%.6f, %.6f\n与真实位置相距 %s", m.latitude, m.longitude, dist)
+        }
+    }
+
+    /** 蓝色圆点 + “真实位置”文字标签。锚点在圆点中心（y=0.3）。 */
+    private fun realIcon(): Drawable {
+        val w = dp(84)
+        val h = dp(60)
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        val cx = w / 2f
+        val cy = dp(18).toFloat()
+        p.color = 0x552196F3
+        c.drawCircle(cx, cy, dp(17).toFloat(), p)
+        p.color = Color.WHITE
+        c.drawCircle(cx, cy, dp(10).toFloat(), p)
+        p.color = 0xFF1E88E5.toInt()
+        c.drawCircle(cx, cy, dp(7).toFloat(), p)
+        val rect = RectF(dp(6).toFloat(), dp(38).toFloat(), (w - dp(6)).toFloat(), (h - dp(4)).toFloat())
+        c.drawRoundRect(rect, dp(10).toFloat(), dp(10).toFloat(), p)
+        p.color = Color.WHITE
+        p.textSize = dp(13).toFloat()
+        p.textAlign = Paint.Align.CENTER
+        p.isFakeBoldText = true
+        val fm = p.fontMetrics
+        c.drawText("真实位置", cx, rect.centerY() - (fm.ascent + fm.descent) / 2, p)
+        return BitmapDrawable(resources, bmp)
+    }
+
+    // ------------------------------------------------------------ 其他
 
     private fun hasLocationPermission() = ContextCompat.checkSelfPermission(
         this, Manifest.permission.ACCESS_FINE_LOCATION) == PackageManager.PERMISSION_GRANTED

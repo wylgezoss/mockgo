@@ -28,7 +28,11 @@ class MockLocationService : Service() {
         const val EXTRA_LAT = "lat"
         const val EXTRA_LNG = "lng"
         const val EXTRA_ERROR = "error"
-        private val PROVIDERS = arrayOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
+        private val PROVIDERS: Array<String> =
+            if (Build.VERSION.SDK_INT >= 31)
+                arrayOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER, "fused")
+            else
+                arrayOf(LocationManager.GPS_PROVIDER, LocationManager.NETWORK_PROVIDER)
 
         @Volatile
         var running = false
@@ -43,7 +47,7 @@ class MockLocationService : Service() {
     private val tick = object : Runnable {
         override fun run() {
             if (!push()) return
-            handler.postDelayed(this, 1000)
+            handler.postDelayed(this, 300)
         }
     }
 
@@ -84,10 +88,14 @@ class MockLocationService : Service() {
 
     private fun setup(): Boolean = try {
         for (p in PROVIDERS) {
-            try { lm.removeTestProvider(p) } catch (_: Exception) {}
-            lm.addTestProvider(p, false, false, false, false, true, true, true,
-                Criteria.POWER_LOW, Criteria.ACCURACY_FINE)
-            lm.setTestProviderEnabled(p, true)
+            try {
+                try { lm.removeTestProvider(p) } catch (_: Exception) {}
+                lm.addTestProvider(p, false, false, false, false, true, true, true,
+                    Criteria.POWER_LOW, Criteria.ACCURACY_FINE)
+                lm.setTestProviderEnabled(p, true)
+            } catch (e: Exception) {
+                if (p == "fused") continue else throw e
+            }
         }
         true
     } catch (e: SecurityException) {
@@ -111,8 +119,10 @@ class MockLocationService : Service() {
                 }
                 lm.setTestProviderLocation(p, loc)
             } catch (e: SecurityException) {
-                fail("未将本应用设为模拟位置信息应用")
-                return false
+                if (p != "fused") {
+                    fail("未将本应用设为模拟位置信息应用")
+                    return false
+                }
             } catch (_: Exception) {}
         }
         return true

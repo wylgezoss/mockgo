@@ -6,7 +6,7 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
 
-/** 国内地图（高德，GCJ-02）坐标 → 系统 GPS 使用的 WGS-84 坐标。 */
+/** 国内地图（高德，GCJ-02）坐标 与 系统 GPS（WGS-84）坐标 互转。 */
 object Gcj {
     private const val A = 6378245.0
     private const val EE = 0.00669342162296594323
@@ -30,9 +30,8 @@ object Gcj {
         return r
     }
 
-    /** 返回 (纬度, 经度) 的 WGS-84 值；境外原样返回。 */
-    fun toWgs84(lat: Double, lng: Double): Pair<Double, Double> {
-        if (outOfChina(lat, lng)) return Pair(lat, lng)
+    /** 该点处 GCJ-02 相对 WGS-84 的偏移（纬度, 经度）。 */
+    private fun delta(lat: Double, lng: Double): Pair<Double, Double> {
         var dLat = tLat(lng - 105.0, lat - 35.0)
         var dLng = tLng(lng - 105.0, lat - 35.0)
         val radLat = lat / 180.0 * PI
@@ -41,6 +40,20 @@ object Gcj {
         val sq = sqrt(magic)
         dLat = dLat * 180.0 / (A * (1 - EE) / (magic * sq) * PI)
         dLng = dLng * 180.0 / (A / sq * cos(radLat) * PI)
-        return Pair(lat - dLat, lng - dLng)
+        return Pair(dLat, dLng)
+    }
+
+    /** 地图坐标(GCJ-02) → 系统 GPS 坐标(WGS-84)，返回 (纬度, 经度)。 */
+    fun toWgs84(lat: Double, lng: Double): Pair<Double, Double> {
+        if (outOfChina(lat, lng)) return Pair(lat, lng)
+        val d = delta(lat, lng)
+        return Pair(lat - d.first, lng - d.second)
+    }
+
+    /** 系统 GPS 坐标(WGS-84) → 地图坐标(GCJ-02)，返回 (纬度, 经度)。 */
+    fun toGcj02(lat: Double, lng: Double): Pair<Double, Double> {
+        if (outOfChina(lat, lng)) return Pair(lat, lng)
+        val d = delta(lat, lng)
+        return Pair(lat + d.first, lng + d.second)
     }
 }
