@@ -17,7 +17,9 @@ import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
 import android.location.Location
 import android.location.LocationManager
+import android.net.Uri
 import android.os.Build
+import android.os.SystemClock
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
@@ -62,6 +64,15 @@ class MainActivity : AppCompatActivity() {
     private var mockGcj: GeoPoint? = null
     private var line: Polyline? = null
     private var realMarker: Marker? = null
+    private lateinit var tvDiag: TextView
+    private var lastPushCount = 0L
+    private var lastDiagTime = 0L
+    private val diagTick = object : Runnable {
+        override fun run() {
+            updateDiag()
+            map.postDelayed(this, 1000)
+        }
+    }
 
     private val sp by lazy { getSharedPreferences("state", MODE_PRIVATE) }
 
@@ -125,8 +136,27 @@ class MainActivity : AppCompatActivity() {
             text = "回到定位"
             setOnClickListener { backToReal() }
         }
-        root.addView(btnBack, FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.CENTER_VERTICAL).apply {
+        val btnStable = Button(this).apply {
+            text = "稳定设置"
+            setOnClickListener { showStability() }
+        }
+        val side = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(btnBack)
+            addView(btnStable)
+        }
+        root.addView(side, FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.CENTER_VERTICAL).apply {
             rightMargin = dp(8)
+        })
+        tvDiag = TextView(this).apply {
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(0xAA000000.toInt())
+            setPadding(dp(8), dp(4), dp(8), dp(4))
+            visibility = View.GONE
+        }
+        root.addView(tvDiag, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply {
+            setMargins(dp(8), dp(40), 0, 0)
         })
         setContentView(root)
         refresh()
@@ -139,9 +169,14 @@ class MainActivity : AppCompatActivity() {
         refresh()
         if (MockLocationService.running) loadSaved()
         updateLine()
+        map.post(diagTick)
     }
 
-    override fun onStop() { unregisterReceiver(receiver); super.onStop() }
+    override fun onStop() {
+        map.removeCallbacks(diagTick)
+        unregisterReceiver(receiver)
+        super.onStop()
+    }
     override fun onResume() { super.onResume(); map.onResume() }
     override fun onPause() { map.onPause(); super.onPause() }
 
@@ -203,6 +238,10 @@ class MainActivity : AppCompatActivity() {
                 .putExtra(MockLocationService.EXTRA_LAT, wgs.first)
                 .putExtra(MockLocationService.EXTRA_LNG, wgs.second))
             refresh()
+            if (!sp.getBoolean("stability_shown", false)) {
+                sp.edit().putBoolean("stability_shown", true).apply()
+                showStability()
+            }
         }
     }
 
@@ -382,6 +421,42 @@ class MainActivity : AppCompatActivity() {
         return BitmapDrawable(resources, bmp)
     }
 
+    // ------------------------------------------------------------ 诊断
+
+    /** 模拟运行时，在左上角显示：推送速率、重建/拉回次数，以及系统此刻认为各来源的位置是模拟还是真实。 */
+    @SuppressLint("MissingPermission")
+    private fun updateDiag() {
+        if (!MockLocationService.running || !hasLocationPermission()) {
+            tvDiag.visibility = View.GONE
+            lastDiagTime = 0L
+            return
+        }
+        tvDiag.visibility = View.VISIBLE
+        val now = SystemClock.elapsedRealtime()
+        val pc = MockLocationService.pushCount
+        val rate = if (lastDiagTime > 0 && now > lastDiagTime) (pc - lastPushCount) * 1000 / (now - lastDiagTime) else 0
+        lastPushCount = pc
+        lastDiagTime = now
+
+        val lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
+        fun tag(name: String, provider: String): String {
+            val l = try { lm.getLastKnownLocation(provider) } catch (_: Exception) { null } ?: return "$name:无"
+            @Suppress("DEPRECATION")
+            val mock = if (Build.VERSION.SDK_INT >= 31) l.isMock else l.isFromMockProvider
+            val res = FloatArray(1)
+            Location.distanceBetween(l.latitude, l.longitude, MockLocationService.curLat, MockLocationService.curLng, res)
+            val age = (SystemClock.elapsedRealtimeNanos() - l.elapsedRealtimeNanos) / 1_000_000_000L
+            return "$name:${if (mock) "模拟" else "真实"} ${res[0].toInt()}m ${age}s"
+        }
+        val sb = StringBuilder()
+        sb.append("推送 ${rate}/秒  重建 ${MockLocationService.rebuildCount}  拉回 ${MockLocationService.leakCount}")
+        if (MockLocationService.lastLeak.isNotEmpty()) sb.append("（${MockLocationService.lastLeak}）")
+        sb.append("\n").append(tag("GPS", LocationManager.GPS_PROVIDER))
+        sb.append("  ").append(tag("网络", LocationManager.NETWORK_PROVIDER))
+        if (Build.VERSION.SDK_INT >= 31) sb.append("  ").append(tag("融合", "fused"))
+        tvDiag.text = sb.toString()
+    }
+
     // ------------------------------------------------------------ 其他
 
     private fun hasLocationPermission() = ContextCompat.checkSelfPermission(
@@ -402,6 +477,31 @@ class MainActivity : AppCompatActivity() {
                     map.controller.animateTo(GeoPoint(la, ln))
                 }
             }.setNegativeButton("取消", null).show()
+    }
+
+    private fun showStability() {
+        AlertDialog.Builder(this).setTitle("提高稳定性")
+            .setMessage(
+                "模拟位置失效或被拉回真实位置，常见原因：\n\n" +
+                "1. 手机把本应用在后台杀掉 → 点“电池设置”，选“不限制 / 允许后台运行”，并在多任务界面给本应用加锁。\n\n" +
+                "2. 其他软件用 WLAN / 基站辅助定位 → 点“位置设置”，关闭“WLAN 扫描”“蓝牙扫描”，定位模式选“仅 GPS / 设备”。\n\n" +
+                "3. 其他软件缓存了旧位置 → 在那个软件里“强行停止”后重新打开。\n\n" +
+                "说明：自带定位 SDK、或会检测模拟位置的软件，仍可能显示真实位置，这是本应用无法解决的。"
+            )
+            .setPositiveButton("电池设置") { _, _ ->
+                try {
+                    startActivity(Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS, Uri.parse("package:$packageName")))
+                } catch (_: Exception) {
+                    try { startActivity(Intent(Settings.ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS)) }
+                    catch (_: Exception) { toast("请在系统设置里手动设置") }
+                }
+            }
+            .setNeutralButton("位置设置") { _, _ ->
+                try { startActivity(Intent(Settings.ACTION_LOCATION_SOURCE_SETTINGS)) }
+                catch (_: Exception) { toast("请在系统设置里手动设置") }
+            }
+            .setNegativeButton("关闭", null)
+            .show()
     }
 
     private fun showError(msg: String) {

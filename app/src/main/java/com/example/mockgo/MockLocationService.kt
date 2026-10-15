@@ -42,6 +42,14 @@ class MockLocationService : Service() {
         @Volatile
         var running = false
             private set
+
+        // 诊断信息（界面读取）
+        @Volatile var curLat = 0.0
+        @Volatile var curLng = 0.0
+        @Volatile var pushCount = 0L
+        @Volatile var rebuildCount = 0
+        @Volatile var leakCount = 0
+        @Volatile var lastLeak = ""
     }
 
     private lateinit var lm: LocationManager
@@ -53,6 +61,7 @@ class MockLocationService : Service() {
     @Volatile private var lat = 0.0
     @Volatile private var lng = 0.0
     private var tickCount = 0
+    private var lastRebuild = 0L
     private var wakeLock: PowerManager.WakeLock? = null
     private val sp by lazy { getSharedPreferences("svc", Context.MODE_PRIVATE) }
 
@@ -61,7 +70,8 @@ class MockLocationService : Service() {
             if (!running) return
             if (!push()) return
             tickCount++
-            if (tickCount % 90 == 0) reassert() // 约每 9 秒检查一次
+            if (tickCount % 10 == 0) watchdog()   // 约每秒检查一次系统看到的位置
+            if (tickCount % 90 == 0) reassert()   // 约每 9 秒确认一次来源仍启用
             worker?.postDelayed(this, TICK_MS)
         }
     }
@@ -117,7 +127,10 @@ class MockLocationService : Service() {
         } catch (_: Exception) {
             // 后台启动前台服务受限时忽略，服务仍可继续
         }
+        curLat = lat
+        curLng = lng
         if (!running) {
+            pushCount = 0; rebuildCount = 0; leakCount = 0; lastLeak = ""
             if (!setup()) return
             running = true
             acquireWakeLock()
@@ -148,8 +161,8 @@ class MockLocationService : Service() {
     }
 
     private fun setup(): Boolean = try {
-        addProvider(GPS)
         addProvider(NET)
+        addProvider(GPS)
         true
     } catch (e: SecurityException) {
         fail("未将本应用设为模拟位置信息应用")
@@ -173,6 +186,7 @@ class MockLocationService : Service() {
     private fun push(): Boolean {
         synchronized(lock) {
             if (!running) return false
+            pushCount++
             val now = System.currentTimeMillis()
             val elapsed = SystemClock.elapsedRealtimeNanos()
 
@@ -210,6 +224,46 @@ class MockLocationService : Service() {
             }
         }
         return true
+    }
+
+    @Suppress("DEPRECATION")
+    private fun isMock(l: Location): Boolean =
+        if (Build.VERSION.SDK_INT >= 31) l.isMock else l.isFromMockProvider
+
+    /**
+     * 看门狗：读取系统此刻认为的 GPS / 网络位置。
+     * 若变成“真实位置”或明显偏离模拟位置，说明模拟来源被绕过 → 重建来源（等同于“停止再开始”）。
+     */
+    @android.annotation.SuppressLint("MissingPermission")
+    private fun watchdog() {
+        var bad: String? = null
+        for (p in arrayOf(GPS, NET)) {
+            val l = try { lm.getLastKnownLocation(p) } catch (_: Exception) { null } ?: continue
+            if (!isMock(l)) { bad = "$p 变为真实位置"; break }
+            val res = FloatArray(1)
+            Location.distanceBetween(l.latitude, l.longitude, lat, lng, res)
+            if (res[0] > 30f) { bad = "$p 偏离 ${res[0].toInt()} 米"; break }
+        }
+        if (bad != null) {
+            leakCount++
+            lastLeak = bad
+            val now = SystemClock.elapsedRealtime()
+            if (now - lastRebuild > 3000) {
+                lastRebuild = now
+                rebuildProviders()
+            }
+        }
+    }
+
+    private fun rebuildProviders() {
+        rebuildCount++
+        try {
+            synchronized(lock) {
+                addProvider(NET)
+                addProvider(GPS)
+            }
+        } catch (_: Exception) {}
+        push()
     }
 
     private fun cleanup() {
