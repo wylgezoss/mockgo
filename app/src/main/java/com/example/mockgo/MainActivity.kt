@@ -11,6 +11,7 @@ import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
 import android.graphics.Paint
+import android.graphics.Point
 import android.graphics.RectF
 import android.graphics.drawable.GradientDrawable
 import android.location.Location
@@ -21,6 +22,8 @@ import android.os.SystemClock
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
+import android.view.GestureDetector
+import android.view.MotionEvent
 import android.text.Editable
 import android.text.TextWatcher
 import android.view.View
@@ -129,16 +132,16 @@ class MainActivity : AppCompatActivity() {
             isScaleControlsEnabled = true
         }
         aMap.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(35.0, 105.0), 4f))
-        aMap.setOnMapClickListener { p -> select(p.latitude, p.longitude) }
-        // 高德底图上的地名/商铺标签会“吃掉”点击，不会走上面的普通点击，所以单独处理，否则点到标签就没反应
-        aMap.setOnPOIClickListener { poi ->
-            select(poi.coordinate.latitude, poi.coordinate.longitude, poi.name ?: "")
+        // 点选位置不依赖高德自带的点击回调（它会被地名/商铺标签干扰，甚至自动跳到标签位置）：
+        // 自己在地图外层监听“单击”，把屏幕坐标直接换算成经纬度，点到哪里就选哪里。
+        aMap.setOnPOIClickListener { } // 标签点击什么都不做，避免高德自己跳选
+        aMap.setOnMarkerClickListener { true } // 点到图钉时不弹气泡
+        val tapLayer = TapLayout(this) { x, y ->
+            val ll = aMap.projection.fromScreenLocation(Point(x.toInt(), y.toInt()))
+            select(ll.latitude, ll.longitude)
         }
-        // 长按任意位置也可选点（不受标签影响）
-        aMap.setOnMapLongClickListener { p -> select(p.latitude, p.longitude) }
-        // 点到已有的图钉时也别弹气泡、别吞点击
-        aMap.setOnMarkerClickListener { true }
-        root.addView(map, FrameLayout.LayoutParams(-1, -1))
+        tapLayer.addView(map, FrameLayout.LayoutParams(-1, -1))
+        root.addView(tapLayer, FrameLayout.LayoutParams(-1, -1))
 
         // 顶部：搜索框 + 搜索 + 历史
         etSearch = EditText(this).apply {
@@ -700,4 +703,15 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
+
+    /** 套在地图外面，只“旁听”单击，不影响地图自己的拖动/缩放。 */
+    private class TapLayout(ctx: Context, val onTap: (Float, Float) -> Unit) : FrameLayout(ctx) {
+        private val detector = GestureDetector(ctx, object : GestureDetector.SimpleOnGestureListener() {
+            override fun onSingleTapConfirmed(e: MotionEvent): Boolean { onTap(e.x, e.y); return false }
+        })
+        override fun dispatchTouchEvent(ev: MotionEvent): Boolean {
+            detector.onTouchEvent(ev)
+            return super.dispatchTouchEvent(ev)
+        }
+    }
 }
