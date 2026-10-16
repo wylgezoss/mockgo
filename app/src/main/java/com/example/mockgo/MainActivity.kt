@@ -10,11 +10,8 @@ import android.content.pm.PackageManager
 import android.graphics.Bitmap
 import android.graphics.Canvas
 import android.graphics.Color
-import android.graphics.DashPathEffect
 import android.graphics.Paint
 import android.graphics.RectF
-import android.graphics.drawable.BitmapDrawable
-import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
 import android.location.Location
 import android.location.LocationManager
@@ -44,17 +41,17 @@ import androidx.appcompat.app.AppCompatActivity
 import androidx.core.content.ContextCompat
 import androidx.core.location.LocationManagerCompat
 import androidx.core.os.CancellationSignal
-import org.osmdroid.config.Configuration
-import org.osmdroid.events.MapEventsReceiver
-import org.osmdroid.tileprovider.tilesource.OnlineTileSourceBase
-import org.osmdroid.util.GeoPoint
-import org.osmdroid.util.MapTileIndex
-import org.osmdroid.views.CustomZoomButtonsController
-import org.osmdroid.views.MapView
-import org.osmdroid.views.overlay.MapEventsOverlay
-import org.osmdroid.views.overlay.Marker
-import org.osmdroid.views.overlay.Polyline
-import java.io.File
+import com.amap.api.maps.AMap
+import com.amap.api.maps.CameraUpdateFactory
+import com.amap.api.maps.MapView
+import com.amap.api.maps.MapsInitializer
+import com.amap.api.maps.model.BitmapDescriptor
+import com.amap.api.maps.model.BitmapDescriptorFactory
+import com.amap.api.maps.model.LatLng
+import com.amap.api.maps.model.Marker
+import com.amap.api.maps.model.MarkerOptions
+import com.amap.api.maps.model.Polyline
+import com.amap.api.maps.model.PolylineOptions
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -63,6 +60,8 @@ import java.util.Locale
 class MainActivity : AppCompatActivity() {
 
     private lateinit var map: MapView
+    private lateinit var aMap: AMap
+    private var selSeq = 0
     private lateinit var tvCoord: TextView
     private lateinit var btnGo: Button
     private lateinit var etSearch: EditText
@@ -76,9 +75,9 @@ class MainActivity : AppCompatActivity() {
     private var lng = Double.NaN
 
     // 开始模拟时记录的“真实位置”和“模拟位置”（均为地图坐标 GCJ-02；真实位置另存一份 WGS-84 用于算距离）
-    private var realGcj: GeoPoint? = null
+    private var realGcj: LatLng? = null
     private var realWgs: DoubleArray? = null
-    private var mockGcj: GeoPoint? = null
+    private var mockGcj: LatLng? = null
     private var line: Polyline? = null
     private var realMarker: Marker? = null
     private lateinit var tvDiag: TextView
@@ -115,24 +114,22 @@ class MainActivity : AppCompatActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Configuration.getInstance().apply {
-            userAgentValue = packageName
-            osmdroidBasePath = File(cacheDir, "osmdroid")
-            osmdroidTileCache = File(cacheDir, "osmdroid/tiles")
-        }
+        // 高德地图 SDK 要求在创建地图前先声明隐私合规，否则地图不显示
+        MapsInitializer.updatePrivacyShow(this, true, true)
+        MapsInitializer.updatePrivacyAgree(this, true)
 
         val root = FrameLayout(this)
-        map = MapView(this).apply {
-            setTileSource(AMAP)
-            setMultiTouchControls(true)
-            zoomController.setVisibility(CustomZoomButtonsController.Visibility.SHOW_AND_FADEOUT)
-            controller.setZoom(5.0)
-            controller.setCenter(GeoPoint(35.0, 105.0))
-            overlays.add(MapEventsOverlay(object : MapEventsReceiver {
-                override fun singleTapConfirmedHelper(p: GeoPoint): Boolean { select(p.latitude, p.longitude); return true }
-                override fun longPressHelper(p: GeoPoint): Boolean = false
-            }))
+        map = MapView(this)
+        map.onCreate(savedInstanceState)
+        aMap = map.map
+        aMap.uiSettings.apply {
+            isZoomControlsEnabled = false
+            isRotateGesturesEnabled = false
+            isTiltGesturesEnabled = false
+            isScaleControlsEnabled = true
         }
+        aMap.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(35.0, 105.0), 4f))
+        aMap.setOnMapClickListener { p -> select(p.latitude, p.longitude) }
         root.addView(map, FrameLayout.LayoutParams(-1, -1))
 
         // 顶部：搜索框 + 搜索 + 历史
@@ -197,7 +194,6 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             addView(btnBack)
             addView(btnStable)
-            addView(Button(this@MainActivity).apply { text = "搜索设置"; setOnClickListener { showSearchCfg() } })
         }
         root.addView(side, FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.CENTER_VERTICAL).apply {
             rightMargin = dp(8)
@@ -242,17 +238,44 @@ class MainActivity : AppCompatActivity() {
     }
     override fun onResume() { super.onResume(); map.onResume() }
     override fun onPause() { map.onPause(); super.onPause() }
+    override fun onSaveInstanceState(outState: Bundle) { super.onSaveInstanceState(outState); map.onSaveInstanceState(outState) }
+    override fun onDestroy() { map.onDestroy(); super.onDestroy() }
+
+    private fun goTo(la: Double, ln: Double, zoom: Float = 16f) {
+        aMap.animateCamera(CameraUpdateFactory.newLatLngZoom(LatLng(la, ln), zoom))
+    }
 
     // ------------------------------------------------------------ 选点
 
     private fun select(la: Double, ln: Double, name: String = "") {
         lat = la; lng = ln
         selName = name
-        val m = marker ?: Marker(map).also { it.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM); map.overlays.add(it); marker = it }
-        m.position = GeoPoint(la, ln)
-        map.invalidate()
-        tvCoord.text = if (name.isEmpty()) String.format("%.6f, %.6f", la, ln)
-        else String.format("%s\n%.6f, %.6f", name, la, ln)
+        val pos = LatLng(la, ln)
+        val m = marker
+        if (m == null) {
+            marker = aMap.addMarker(MarkerOptions().position(pos).anchor(0.5f, 1f))
+        } else {
+            m.position = pos
+        }
+        showSel()
+
+        // 点地图选点时没有名字：有高德 Key 就反查中文地址，方便历史记录里辨认
+        val s = ++selSeq
+        val key = Geo.WEB_KEY
+        if (name.isEmpty() && key.isNotEmpty()) {
+            Thread {
+                val addr = Geo.reverse(la, ln, key)
+                if (addr != null) runOnUiThread {
+                    if (s == selSeq) { selName = addr; showSel() }
+                }
+            }.start()
+        }
+    }
+
+    private fun showSel() {
+        if (lat.isNaN()) return
+        tvCoord.text = if (selName.isEmpty()) String.format("%.6f, %.6f", lat, lng)
+        else String.format("%s\n%.6f, %.6f", selName, lat, lng)
     }
 
     private fun refresh() { btnGo.text = if (MockLocationService.running) "停止" else "开始" }
@@ -288,14 +311,14 @@ class MainActivity : AppCompatActivity() {
             btnGo.isEnabled = true
             if (real != null) {
                 val g = Gcj.toGcj02(real.latitude, real.longitude)
-                realGcj = GeoPoint(g.first, g.second)
+                realGcj = LatLng(g.first, g.second)
                 realWgs = doubleArrayOf(real.latitude, real.longitude)
             } else {
                 realGcj = null
                 realWgs = null
                 toast("未获取到真实位置，将不显示连线")
             }
-            mockGcj = GeoPoint(la, ln)
+            mockGcj = LatLng(la, ln)
             saveState()
             History.add(this, nm, la, ln)
 
@@ -335,7 +358,7 @@ class MainActivity : AppCompatActivity() {
                     toast("未获取到真实位置，请确认系统定位已开启")
                 } else {
                     val g = Gcj.toGcj02(real.latitude, real.longitude)
-                    realGcj = GeoPoint(g.first, g.second)
+                    realGcj = LatLng(g.first, g.second)
                     realWgs = doubleArrayOf(real.latitude, real.longitude)
                     updateLine()
                     focusOn(realGcj!!)
@@ -344,9 +367,8 @@ class MainActivity : AppCompatActivity() {
         }
     }
 
-    private fun focusOn(p: GeoPoint) {
-        map.controller.setZoom(17.0)
-        map.controller.animateTo(p)
+    private fun focusOn(p: LatLng) {
+        goTo(p.latitude, p.longitude, 17f)
     }
 
     @SuppressLint("MissingPermission")
@@ -412,44 +434,33 @@ class MainActivity : AppCompatActivity() {
     private fun loadSaved() {
         if (realGcj == null) {
             val p = (sp.getString("real", "") ?: "").split(",").mapNotNull { it.toDoubleOrNull() }
-            if (p.size == 4) { realGcj = GeoPoint(p[0], p[1]); realWgs = doubleArrayOf(p[2], p[3]) }
+            if (p.size == 4) { realGcj = LatLng(p[0], p[1]); realWgs = doubleArrayOf(p[2], p[3]) }
         }
         if (mockGcj == null) {
             val p = (sp.getString("mock", "") ?: "").split(",").mapNotNull { it.toDoubleOrNull() }
-            if (p.size == 2) mockGcj = GeoPoint(p[0], p[1])
+            if (p.size == 2) mockGcj = LatLng(p[0], p[1])
         }
     }
 
     /** 真实位置：始终显示蓝色图标；模拟运行中再画与模拟位置的虚线并显示距离。 */
     private fun updateLine() {
-        line?.let { map.overlays.remove(it) }
-        realMarker?.let { map.overlays.remove(it) }
+        line?.remove()
+        realMarker?.remove()
         line = null
         realMarker = null
 
         val r = realGcj
         val m = mockGcj
-        if (r == null) {
-            map.invalidate()
-            return
-        }
+        if (r == null) return
 
         if (MockLocationService.running && m != null) {
-            line = Polyline(map).apply {
-                setPoints(listOf(r, m))
-                outlinePaint.color = 0xFFE53935.toInt()
-                outlinePaint.strokeWidth = 6f
-                outlinePaint.pathEffect = DashPathEffect(floatArrayOf(24f, 14f), 0f)
-            }
-            map.overlays.add(line)
+            line = aMap.addPolyline(
+                PolylineOptions().add(r, m).color(0xFFE53935.toInt()).width(8f).setDottedLine(true)
+            )
         }
-        realMarker = Marker(map).apply {
-            position = r
-            icon = realIcon()
-            setAnchor(0.5f, 0.3f)
-        }
-        map.overlays.add(realMarker)
-        map.invalidate()
+        realMarker = aMap.addMarker(
+            MarkerOptions().position(r).icon(realIcon()).anchor(0.5f, 0.3f).zIndex(10f)
+        )
 
         val w = realWgs
         if (MockLocationService.running && m != null && w != null) {
@@ -463,7 +474,7 @@ class MainActivity : AppCompatActivity() {
     }
 
     /** 蓝色圆点 + “真实位置”文字标签。锚点在圆点中心（y=0.3）。 */
-    private fun realIcon(): Drawable {
+    private fun realIcon(): BitmapDescriptor {
         val w = dp(84)
         val h = dp(60)
         val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
@@ -485,7 +496,7 @@ class MainActivity : AppCompatActivity() {
         p.isFakeBoldText = true
         val fm = p.fontMetrics
         c.drawText("真实位置", cx, rect.centerY() - (fm.ascent + fm.descent) / 2, p)
-        return BitmapDrawable(resources, bmp)
+        return BitmapDescriptorFactory.fromBitmap(bmp)
     }
 
     // ------------------------------------------------------------ 诊断
@@ -539,7 +550,7 @@ class MainActivity : AppCompatActivity() {
         if (q.isEmpty()) { hideResults(); return }
         if (!explicit && q.length < 2) return
         val seq = ++searchSeq
-        val key = (sp.getString("amap_key", "") ?: "").trim()
+        val key = Geo.WEB_KEY
         if (explicit) { hideKeyboard(); toast("搜索中…") }
         Thread {
             val r = Geo.search(q, key)
@@ -578,36 +589,14 @@ class MainActivity : AppCompatActivity() {
             etSearch.setText(p.name)
             suppressWatcher = false
             select(p.lat, p.lng, p.name)
-            map.controller.setZoom(16.0)
-            map.controller.animateTo(GeoPoint(p.lat, p.lng))
+            goTo(p.lat, p.lng)
         }
-    }
-
-    private fun showSearchCfg() {
-        val et = EditText(this).apply {
-            hint = "高德 Web 服务 Key（可留空）"
-            setSingleLine()
-            setText(sp.getString("amap_key", "") ?: "")
-            setPadding(dp(24), dp(16), dp(24), dp(8))
-        }
-        AlertDialog.Builder(this).setTitle("搜索设置")
-            .setMessage(
-                "不填也能搜索（使用 OpenStreetMap，国内的小地名可能找不全，速度也偏慢）。\n\n" +
-                "想要又快又准：到 lbs.amap.com 注册并创建应用，添加“Web 服务”类型的 Key，把 Key 粘贴到下面。"
-            )
-            .setView(et)
-            .setPositiveButton("保存") { _, _ ->
-                sp.edit().putString("amap_key", et.text.toString().trim()).apply()
-                toast("已保存")
-            }
-            .setNegativeButton("取消", null)
-            .show()
     }
 
     private fun showHistory() {
         val items = History.load(this)
         if (items.isEmpty()) { toast("暂无历史记录"); return }
-        val fmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+        val fmt = SimpleDateFormat("M月d日 HH:mm", Locale.CHINA)
         val lv = ListView(this)
         val adapter = object : ArrayAdapter<History.Item>(this, android.R.layout.simple_list_item_2, android.R.id.text1, items) {
             override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
@@ -633,8 +622,7 @@ class MainActivity : AppCompatActivity() {
             suppressWatcher = false
             hideResults()
             select(h.lat, h.lng, h.name)
-            map.controller.setZoom(16.0)
-            map.controller.animateTo(GeoPoint(h.lat, h.lng))
+            goTo(h.lat, h.lng)
         }
         lv.setOnItemLongClickListener { _, _, pos, _ ->
             val h = adapter.getItem(pos)
@@ -664,8 +652,7 @@ class MainActivity : AppCompatActivity() {
                     toast("输入有误")
                 } else {
                     select(la, ln)
-                    map.controller.setZoom(16.0)
-                    map.controller.animateTo(GeoPoint(la, ln))
+                    goTo(la, ln)
                 }
             }.setNegativeButton("取消", null).show()
     }
@@ -705,22 +692,4 @@ class MainActivity : AppCompatActivity() {
     }
 
     private fun toast(s: String) = Toast.makeText(this, s, Toast.LENGTH_SHORT).show()
-
-    companion object {
-        /** 高德地图瓦片（GCJ-02 坐标系）。 */
-        private val AMAP = object : OnlineTileSourceBase(
-            "AMap", 3, 18, 256, ".png",
-            arrayOf(
-                "https://webst01.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7",
-                "https://webst02.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7",
-                "https://webst03.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7",
-                "https://webst04.is.autonavi.com/appmaptile?lang=zh_cn&size=1&scale=1&style=7"
-            )
-        ) {
-            override fun getTileURLString(pMapTileIndex: Long): String =
-                baseUrl + "&x=" + MapTileIndex.getX(pMapTileIndex) +
-                        "&y=" + MapTileIndex.getY(pMapTileIndex) +
-                        "&z=" + MapTileIndex.getZoom(pMapTileIndex)
-        }
-    }
 }

@@ -11,6 +11,9 @@ import java.net.URLEncoder
  * 顺序：高德（需自己填 Key，最准）→ OpenStreetMap Nominatim → Photon。
  */
 object Geo {
+    /** 高德 Web 服务 Key（用于地名搜索和反查中文地址）。 */
+    const val WEB_KEY = "d76ad72d46c19d95d72d6e5497161961"
+
     data class Place(val name: String, val addr: String, val lat: Double, val lng: Double)
     data class Result(val places: List<Place>, val error: String?)
 
@@ -52,6 +55,18 @@ object Geo {
             if (err == null) err = "网络搜索失败，请检查网络"
         }
         return Result(emptyList(), err)
+    }
+
+    /** 高德 Web 服务 · 逆地理编码：坐标（GCJ-02）→ 中文地址。失败返回 null。 */
+    fun reverse(lat: Double, lng: Double, key: String): String? {
+        return try {
+            val j = JSONObject(get("https://restapi.amap.com/v3/geocode/regeo?key=${enc(key)}&location=$lng,$lat&extensions=base"))
+            if (j.optString("status") != "1") return null
+            val a = j.optJSONObject("regeocode")?.opt("formatted_address") as? String
+            a?.takeIf { it.isNotBlank() }
+        } catch (_: Exception) {
+            null
+        }
     }
 
     /** 高德 Web 服务 · 关键字搜索（返回 GCJ-02）。 */
