@@ -15,7 +15,23 @@ android {
         versionName = "1.0.0"
     }
 
+    // 固定签名：把 mockgo.keystore 放在 app/ 目录下，构建出的 APK 签名每次都一样
+    val ks = file("mockgo.keystore")
+    if (ks.exists()) {
+        signingConfigs {
+            create("fixed") {
+                storeFile = ks
+                storePassword = "mockgo123"
+                keyAlias = "mockgo"
+                keyPassword = "mockgo123"
+            }
+        }
+    }
+
     buildTypes {
+        debug {
+            if (ks.exists()) signingConfig = signingConfigs.getByName("fixed")
+        }
         release {
             isMinifyEnabled = false
         }
@@ -35,6 +51,6 @@ android {
 dependencies {
     implementation("androidx.core:core-ktx:1.13.1")
     implementation("androidx.appcompat:appcompat:1.7.0")
-    // 地图：OpenStreetMap（WGS84 坐标，无需 API Key）
-    implementation("org.osmdroid:osmdroid-android:6.1.18")
+    // 地图：高德 3D 地图 SDK（GCJ-02 坐标，在线加载，不需要离线地图）
+    implementation("com.amap.api:3dmap:9.8.3")
 }
