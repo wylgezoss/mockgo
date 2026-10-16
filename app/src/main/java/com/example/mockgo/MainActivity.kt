@@ -130,6 +130,14 @@ class MainActivity : AppCompatActivity() {
         }
         aMap.moveCamera(CameraUpdateFactory.newLatLngZoom(LatLng(35.0, 105.0), 4f))
         aMap.setOnMapClickListener { p -> select(p.latitude, p.longitude) }
+        // 高德底图上的地名/商铺标签会“吃掉”点击，不会走上面的普通点击，所以单独处理，否则点到标签就没反应
+        aMap.setOnPOIClickListener { poi ->
+            select(poi.coordinate.latitude, poi.coordinate.longitude, poi.name ?: "")
+        }
+        // 长按任意位置也可选点（不受标签影响）
+        aMap.setOnMapLongClickListener { p -> select(p.latitude, p.longitude) }
+        // 点到已有的图钉时也别弹气泡、别吞点击
+        aMap.setOnMarkerClickListener { true }
         root.addView(map, FrameLayout.LayoutParams(-1, -1))
 
         // 顶部：搜索框 + 搜索 + 历史
