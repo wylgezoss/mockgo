@@ -22,7 +22,7 @@ import androidx.core.app.NotificationCompat
 import androidx.core.app.ServiceCompat
 
 /**
- * 前台服务：在独立线程里持续向系统上报固定的模拟位置（GPS + 网络两个来源）。
+ * 前台服务：在独立线程里持续向系统上报固定的模拟位置（GPS + 网络 + 融合定位）。
  * GPS 来源按真实 GPS 的形式声明（需要卫星、高精度）并附带卫星数；
  * 另有唤醒锁、被系统杀掉后自动恢复、定期检查来源是否仍然有效。
  */
@@ -38,6 +38,7 @@ class MockLocationService : Service() {
         private const val TICK_MS = 100L
         private const val GPS = LocationManager.GPS_PROVIDER
         private const val NET = LocationManager.NETWORK_PROVIDER
+        private const val FUSED = "fused"
 
         @Volatile
         var running = false
@@ -145,15 +146,20 @@ class MockLocationService : Service() {
 
     // ---------------------------------------------------------- 提供者
 
-    /** GPS：需要卫星、高精度；网络：需要网络和基站、粗精度。 */
+    /** 参与模拟的所有来源：GPS、网络，Android 12 及以上再加融合定位。 */
+    private fun allProviders(): Array<String> =
+        if (Build.VERSION.SDK_INT >= 31) arrayOf(GPS, NET, FUSED) else arrayOf(GPS, NET)
+
+    /** GPS：需要卫星、高精度；网络：需要网络和基站、粗精度；融合：低功耗、高精度。 */
     private fun addProvider(p: String) {
         synchronized(lock) {
             try { lm.removeTestProvider(p) } catch (_: Exception) {}
-            if (p == GPS) {
-                lm.addTestProvider(GPS, false, true, false, false, true, true, true,
+            when (p) {
+                GPS -> lm.addTestProvider(GPS, false, true, false, false, true, true, true,
                     Criteria.POWER_HIGH, Criteria.ACCURACY_FINE)
-            } else {
-                lm.addTestProvider(NET, true, false, true, true, true, true, true,
+                FUSED -> lm.addTestProvider(FUSED, false, false, false, false, true, true, true,
+                    Criteria.POWER_LOW, Criteria.ACCURACY_FINE)
+                else -> lm.addTestProvider(NET, true, false, true, true, true, true, true,
                     Criteria.POWER_LOW, Criteria.ACCURACY_COARSE)
             }
             lm.setTestProviderEnabled(p, true)
@@ -163,6 +169,9 @@ class MockLocationService : Service() {
     private fun setup(): Boolean = try {
         addProvider(NET)
         addProvider(GPS)
+        if (Build.VERSION.SDK_INT >= 31) {
+            try { addProvider(FUSED) } catch (_: Exception) {} // 融合来源失败不影响整体
+        }
         true
     } catch (e: SecurityException) {
         fail("未将本应用设为模拟位置信息应用")
@@ -174,7 +183,7 @@ class MockLocationService : Service() {
 
     /** 定期确认提供者仍可用；被系统移除则重建。 */
     private fun reassert() {
-        for (p in arrayOf(GPS, NET)) {
+        for (p in allProviders()) {
             try {
                 synchronized(lock) { lm.setTestProviderEnabled(p, true) }
             } catch (_: Exception) {
@@ -211,10 +220,25 @@ class MockLocationService : Service() {
                 time = now
                 elapsedRealtimeNanos = elapsed
             }
-            for ((p, loc) in listOf(NET to n, GPS to g)) {
+            val list = mutableListOf(NET to n, GPS to g)
+            if (Build.VERSION.SDK_INT >= 31) {
+                val f = Location(FUSED).apply {
+                    latitude = lat
+                    longitude = lng
+                    altitude = 50.0
+                    accuracy = 3f
+                    speed = 0f
+                    bearing = 0f
+                    time = now
+                    elapsedRealtimeNanos = elapsed
+                }
+                list.add(FUSED to f)
+            }
+            for ((p, loc) in list) {
                 try {
                     lm.setTestProviderLocation(p, loc)
                 } catch (e: SecurityException) {
+                    if (p == FUSED) continue
                     main.post { fail("未将本应用设为模拟位置信息应用") }
                     return false
                 } catch (e: IllegalArgumentException) {
@@ -261,6 +285,7 @@ class MockLocationService : Service() {
             synchronized(lock) {
                 addProvider(NET)
                 addProvider(GPS)
+                if (Build.VERSION.SDK_INT >= 31) try { addProvider(FUSED) } catch (_: Exception) {}
             }
         } catch (_: Exception) {}
         push()
@@ -268,7 +293,7 @@ class MockLocationService : Service() {
 
     private fun cleanup() {
         synchronized(lock) {
-            for (p in arrayOf(GPS, NET)) {
+            for (p in allProviders()) {
                 try {
                     lm.setTestProviderEnabled(p, false)
                     lm.removeTestProvider(p)

@@ -15,6 +15,7 @@ import android.graphics.Paint
 import android.graphics.RectF
 import android.graphics.drawable.BitmapDrawable
 import android.graphics.drawable.Drawable
+import android.graphics.drawable.GradientDrawable
 import android.location.Location
 import android.location.LocationManager
 import android.net.Uri
@@ -23,11 +24,18 @@ import android.os.SystemClock
 import android.os.Bundle
 import android.provider.Settings
 import android.view.Gravity
+import android.text.Editable
+import android.text.TextWatcher
 import android.view.View
+import android.view.ViewGroup
+import android.view.inputmethod.EditorInfo
+import android.view.inputmethod.InputMethodManager
+import android.widget.ArrayAdapter
 import android.widget.Button
 import android.widget.EditText
 import android.widget.FrameLayout
 import android.widget.LinearLayout
+import android.widget.ListView
 import android.widget.TextView
 import android.widget.Toast
 import androidx.activity.result.contract.ActivityResultContracts
@@ -47,6 +55,9 @@ import org.osmdroid.views.overlay.MapEventsOverlay
 import org.osmdroid.views.overlay.Marker
 import org.osmdroid.views.overlay.Polyline
 import java.io.File
+import java.text.SimpleDateFormat
+import java.util.Date
+import java.util.Locale
 
 /** 点地图选位置 → 开始模拟；地图上画出模拟位置与真实位置的连线；可一键回到真实位置。 */
 class MainActivity : AppCompatActivity() {
@@ -54,6 +65,12 @@ class MainActivity : AppCompatActivity() {
     private lateinit var map: MapView
     private lateinit var tvCoord: TextView
     private lateinit var btnGo: Button
+    private lateinit var etSearch: EditText
+    private lateinit var lvResults: ListView
+    private var selName = ""
+    private var searchSeq = 0
+    private var suppressWatcher = false
+    private val searchRunnable = Runnable { doSearch(false) }
     private var marker: Marker? = null
     private var lat = Double.NaN
     private var lng = Double.NaN
@@ -118,6 +135,42 @@ class MainActivity : AppCompatActivity() {
         }
         root.addView(map, FrameLayout.LayoutParams(-1, -1))
 
+        // 顶部：搜索框 + 搜索 + 历史
+        etSearch = EditText(this).apply {
+            hint = "搜索地名 / 地址"
+            setSingleLine()
+            imeOptions = EditorInfo.IME_ACTION_SEARCH
+            setTextColor(Color.BLACK)
+            setHintTextColor(Color.GRAY)
+            setOnEditorActionListener { _, id, _ ->
+                if (id == EditorInfo.IME_ACTION_SEARCH) { doSearch(true); true } else false
+            }
+            addTextChangedListener(object : TextWatcher {
+                override fun beforeTextChanged(s: CharSequence?, st: Int, c: Int, a: Int) {}
+                override fun onTextChanged(s: CharSequence?, st: Int, b: Int, c: Int) {}
+                override fun afterTextChanged(s: Editable?) {
+                    if (suppressWatcher) return
+                    map.removeCallbacks(searchRunnable)
+                    if ((s?.length ?: 0) < 2) { hideResults(); return }
+                    map.postDelayed(searchRunnable, 700) // 输入停顿 0.7 秒后自动搜索
+                }
+            })
+        }
+        val btnSearch = Button(this).apply { text = "搜索"; setOnClickListener { doSearch(true) } }
+        val btnHist = Button(this).apply { text = "历史"; setOnClickListener { showHistory() } }
+        val top = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = GradientDrawable().apply { cornerRadius = dp(14).toFloat(); setColor(0xF2FFFFFF.toInt()) }
+            setPadding(dp(14), dp(2), dp(6), dp(2))
+            addView(etSearch, LinearLayout.LayoutParams(0, -2, 1f))
+            addView(btnSearch)
+            addView(btnHist)
+        }
+        root.addView(top, FrameLayout.LayoutParams(-1, -2, Gravity.TOP).apply {
+            setMargins(dp(8), dp(36), dp(8), 0)
+        })
+
         tvCoord = TextView(this).apply { text = "点击地图选择位置"; setTextColor(0xFF000000.toInt()) }
         val btnInput = Button(this).apply { text = "输入坐标"; setOnClickListener { inputDialog() } }
         btnGo = Button(this).apply { setOnClickListener { onGo() } }
@@ -144,6 +197,7 @@ class MainActivity : AppCompatActivity() {
             orientation = LinearLayout.VERTICAL
             addView(btnBack)
             addView(btnStable)
+            addView(Button(this@MainActivity).apply { text = "搜索设置"; setOnClickListener { showSearchCfg() } })
         }
         root.addView(side, FrameLayout.LayoutParams(-2, -2, Gravity.END or Gravity.CENTER_VERTICAL).apply {
             rightMargin = dp(8)
@@ -155,8 +209,17 @@ class MainActivity : AppCompatActivity() {
             setPadding(dp(8), dp(4), dp(8), dp(4))
             visibility = View.GONE
         }
-        root.addView(tvDiag, FrameLayout.LayoutParams(-2, -2, Gravity.TOP or Gravity.START).apply {
-            setMargins(dp(8), dp(40), 0, 0)
+        root.addView(tvDiag, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.START).apply {
+            setMargins(dp(8), 0, 0, dp(100))
+        })
+
+        // 搜索结果下拉列表（盖在最上层）
+        lvResults = ListView(this).apply {
+            setBackgroundColor(Color.WHITE)
+            visibility = View.GONE
+        }
+        root.addView(lvResults, FrameLayout.LayoutParams(-1, dp(300), Gravity.TOP).apply {
+            setMargins(dp(8), dp(92), dp(8), 0)
         })
         setContentView(root)
         refresh()
@@ -182,12 +245,14 @@ class MainActivity : AppCompatActivity() {
 
     // ------------------------------------------------------------ 选点
 
-    private fun select(la: Double, ln: Double) {
+    private fun select(la: Double, ln: Double, name: String = "") {
         lat = la; lng = ln
+        selName = name
         val m = marker ?: Marker(map).also { it.setAnchor(Marker.ANCHOR_CENTER, Marker.ANCHOR_BOTTOM); map.overlays.add(it); marker = it }
         m.position = GeoPoint(la, ln)
         map.invalidate()
-        tvCoord.text = String.format("%.6f, %.6f", la, ln)
+        tvCoord.text = if (name.isEmpty()) String.format("%.6f, %.6f", la, ln)
+        else String.format("%s\n%.6f, %.6f", name, la, ln)
     }
 
     private fun refresh() { btnGo.text = if (MockLocationService.running) "停止" else "开始" }
@@ -216,6 +281,7 @@ class MainActivity : AppCompatActivity() {
         if (lat.isNaN()) return
         val la = lat
         val ln = lng
+        val nm = selName.ifEmpty { String.format("%.5f, %.5f", la, ln) }
         btnGo.isEnabled = false
         btnGo.text = "定位中…"
         fetchReal { real ->
@@ -231,6 +297,7 @@ class MainActivity : AppCompatActivity() {
             }
             mockGcj = GeoPoint(la, ln)
             saveState()
+            History.add(this, nm, la, ln)
 
             val wgs = Gcj.toWgs84(la, ln) // 地图上点的是国内坐标，转成 GPS 坐标再模拟
             ContextCompat.startForegroundService(this, Intent(this, MockLocationService::class.java)
@@ -455,6 +522,130 @@ class MainActivity : AppCompatActivity() {
         sb.append("  ").append(tag("网络", LocationManager.NETWORK_PROVIDER))
         if (Build.VERSION.SDK_INT >= 31) sb.append("  ").append(tag("融合", "fused"))
         tvDiag.text = sb.toString()
+    }
+
+    // ------------------------------------------------------------ 搜索 / 历史
+
+    private fun hideKeyboard() {
+        (getSystemService(Context.INPUT_METHOD_SERVICE) as InputMethodManager)
+            .hideSoftInputFromWindow(etSearch.windowToken, 0)
+    }
+
+    private fun hideResults() { lvResults.visibility = View.GONE }
+
+    /** explicit=true：点了“搜索”或键盘搜索键；false：输入停顿后的自动搜索。 */
+    private fun doSearch(explicit: Boolean) {
+        val q = etSearch.text.toString().trim()
+        if (q.isEmpty()) { hideResults(); return }
+        if (!explicit && q.length < 2) return
+        val seq = ++searchSeq
+        val key = (sp.getString("amap_key", "") ?: "").trim()
+        if (explicit) { hideKeyboard(); toast("搜索中…") }
+        Thread {
+            val r = Geo.search(q, key)
+            runOnUiThread {
+                if (seq != searchSeq) return@runOnUiThread // 已有更新的搜索，丢弃旧结果
+                if (r.places.isEmpty()) {
+                    hideResults()
+                    if (explicit) toast(r.error ?: "没有找到相关地点")
+                } else {
+                    showResults(r.places)
+                }
+            }
+        }.start()
+    }
+
+    private fun showResults(list: List<Geo.Place>) {
+        val adapter = object : ArrayAdapter<Geo.Place>(this, android.R.layout.simple_list_item_2, android.R.id.text1, list) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val v = super.getView(position, convertView, parent)
+                val p = getItem(position)!!
+                v.findViewById<TextView>(android.R.id.text1).apply { text = p.name; setTextColor(Color.BLACK) }
+                v.findViewById<TextView>(android.R.id.text2).apply { text = p.addr; setTextColor(Color.DKGRAY); maxLines = 2 }
+                return v
+            }
+        }
+        lvResults.adapter = adapter
+        val lp = lvResults.layoutParams
+        lp.height = minOf(list.size * dp(64), dp(320))
+        lvResults.layoutParams = lp
+        lvResults.visibility = View.VISIBLE
+        lvResults.setOnItemClickListener { _, _, pos, _ ->
+            val p = adapter.getItem(pos) ?: return@setOnItemClickListener
+            hideResults()
+            hideKeyboard()
+            suppressWatcher = true
+            etSearch.setText(p.name)
+            suppressWatcher = false
+            select(p.lat, p.lng, p.name)
+            map.controller.setZoom(16.0)
+            map.controller.animateTo(GeoPoint(p.lat, p.lng))
+        }
+    }
+
+    private fun showSearchCfg() {
+        val et = EditText(this).apply {
+            hint = "高德 Web 服务 Key（可留空）"
+            setSingleLine()
+            setText(sp.getString("amap_key", "") ?: "")
+            setPadding(dp(24), dp(16), dp(24), dp(8))
+        }
+        AlertDialog.Builder(this).setTitle("搜索设置")
+            .setMessage(
+                "不填也能搜索（使用 OpenStreetMap，国内的小地名可能找不全，速度也偏慢）。\n\n" +
+                "想要又快又准：到 lbs.amap.com 注册并创建应用，添加“Web 服务”类型的 Key，把 Key 粘贴到下面。"
+            )
+            .setView(et)
+            .setPositiveButton("保存") { _, _ ->
+                sp.edit().putString("amap_key", et.text.toString().trim()).apply()
+                toast("已保存")
+            }
+            .setNegativeButton("取消", null)
+            .show()
+    }
+
+    private fun showHistory() {
+        val items = History.load(this)
+        if (items.isEmpty()) { toast("暂无历史记录"); return }
+        val fmt = SimpleDateFormat("MM-dd HH:mm", Locale.getDefault())
+        val lv = ListView(this)
+        val adapter = object : ArrayAdapter<History.Item>(this, android.R.layout.simple_list_item_2, android.R.id.text1, items) {
+            override fun getView(position: Int, convertView: View?, parent: ViewGroup): View {
+                val v = super.getView(position, convertView, parent)
+                val h = getItem(position)!!
+                v.findViewById<TextView>(android.R.id.text1).text = h.name
+                v.findViewById<TextView>(android.R.id.text2).text =
+                    String.format("%.5f, %.5f  ·  %s", h.lat, h.lng, fmt.format(Date(h.time)))
+                return v
+            }
+        }
+        lv.adapter = adapter
+        val dlg = AlertDialog.Builder(this).setTitle("历史位置（点选使用，长按删除）")
+            .setView(lv)
+            .setNeutralButton("清空") { _, _ -> History.clear(this); toast("已清空") }
+            .setNegativeButton("关闭", null)
+            .create()
+        lv.setOnItemClickListener { _, _, pos, _ ->
+            val h = adapter.getItem(pos) ?: return@setOnItemClickListener
+            dlg.dismiss()
+            suppressWatcher = true
+            etSearch.setText("")
+            suppressWatcher = false
+            hideResults()
+            select(h.lat, h.lng, h.name)
+            map.controller.setZoom(16.0)
+            map.controller.animateTo(GeoPoint(h.lat, h.lng))
+        }
+        lv.setOnItemLongClickListener { _, _, pos, _ ->
+            val h = adapter.getItem(pos)
+            if (h != null) {
+                History.remove(this, h)
+                adapter.remove(h)
+                if (adapter.isEmpty) dlg.dismiss()
+            }
+            true
+        }
+        dlg.show()
     }
 
     // ------------------------------------------------------------ 其他
