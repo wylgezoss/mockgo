@@ -79,6 +79,8 @@ class MockLocationService : Service() {
 
     override fun onBind(intent: Intent?): IBinder? = null
 
+    private var badge: FloatBadge? = null
+
     override fun onCreate() {
         super.onCreate()
         lm = getSystemService(Context.LOCATION_SERVICE) as LocationManager
@@ -113,6 +115,8 @@ class MockLocationService : Service() {
     }
 
     override fun onDestroy() {
+        badge?.hide()
+        badge = null
         running = false
         worker?.removeCallbacksAndMessages(null)
         thread?.quitSafely()
@@ -135,6 +139,8 @@ class MockLocationService : Service() {
             if (!setup()) return
             running = true
             acquireWakeLock()
+            if (badge == null) badge = FloatBadge(this)
+            badge?.show()
             val t = HandlerThread("mock-loc", android.os.Process.THREAD_PRIORITY_FOREGROUND).also { it.start() }
             thread = t
             worker = Handler(t.looper).also { it.post(tick) }
@@ -325,6 +331,8 @@ class MockLocationService : Service() {
 
     private fun stopAll() {
         sp.edit().putBoolean("active", false).apply()
+        badge?.hide()
+        badge = null
         running = false
         worker?.removeCallbacksAndMessages(null)
         thread?.quitSafely()

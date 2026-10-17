@@ -220,6 +220,16 @@ class MainActivity : AppCompatActivity() {
             setMargins(dp(8), 0, 0, dp(100))
         })
 
+        // 版本号（每次升级都在 app/build.gradle.kts 里调高）
+        val ver = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "" }
+        root.addView(TextView(this).apply {
+            text = "v$ver"
+            textSize = 11f
+            setTextColor(Color.WHITE)
+            setBackgroundColor(0x88000000.toInt())
+            setPadding(dp(6), dp(2), dp(6), dp(2))
+        }, FrameLayout.LayoutParams(-2, -2, Gravity.BOTTOM or Gravity.END).apply { setMargins(0, 0, dp(8), dp(76)) })
+
         // 搜索结果下拉列表（盖在最上层）
         lvResults = ListView(this).apply {
             setBackgroundColor(Color.WHITE)
@@ -301,6 +311,20 @@ class MainActivity : AppCompatActivity() {
             val need = mutableListOf(Manifest.permission.ACCESS_FINE_LOCATION)
             if (Build.VERSION.SDK_INT >= 33) need.add(Manifest.permission.POST_NOTIFICATIONS)
             permLauncher.launch(need.toTypedArray())
+            return
+        }
+        // 首次开始时请求悬浮窗权限：模拟期间显示小悬浮框，有助于让系统不杀掉本应用
+        if (Build.VERSION.SDK_INT >= 23 && !Settings.canDrawOverlays(this) && !sp.getBoolean("overlay_asked", false)) {
+            sp.edit().putBoolean("overlay_asked", true).apply()
+            AlertDialog.Builder(this).setTitle("开启悬浮窗")
+                .setMessage("开始模拟后会显示一个“模拟中”小悬浮框，能帮助系统保持本应用运行、不被杀掉；点击悬浮框可回到本应用，停止模拟后自动消失。\n\n点“去开启”，在列表里允许本应用后返回，再点“开始”。")
+                .setPositiveButton("去开启") { _, _ ->
+                    try {
+                        startActivity(Intent(Settings.ACTION_MANAGE_OVERLAY_PERMISSION, Uri.parse("package:$packageName")))
+                    } catch (_: Exception) { toast("请在系统设置里手动开启悬浮窗权限") }
+                }
+                .setNegativeButton("跳过") { _, _ -> launch() }
+                .show()
             return
         }
         launch()

@@ -9,7 +9,7 @@ object History {
     data class Item(val name: String, val lat: Double, val lng: Double, val time: Long)
 
     private const val KEY = "list"
-    private const val MAX = 100
+    private const val MAX = 10
 
     private fun sp(ctx: Context) = ctx.getSharedPreferences("hist", Context.MODE_PRIVATE)
 
