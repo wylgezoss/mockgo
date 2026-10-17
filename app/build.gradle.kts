@@ -11,8 +11,8 @@ android {
         applicationId = "com.example.mockgo"
         minSdk = 24
         targetSdk = 34
-        versionCode = 1
-        versionName = "1.0.0"
+        versionCode = 2
+        versionName = "1.1.0"
     }
 
     // 固定签名：把 mockgo.keystore 放在 app/ 目录下，构建出的 APK 签名每次都一样
