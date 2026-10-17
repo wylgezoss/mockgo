@@ -33,7 +33,6 @@
         </activity>
         <service
             android:name=".MockLocationService"
-            android:exported="false"
-            android:foregroundServiceType="location" />
+            android:exported="false" />
     </application>
 </manifest>
