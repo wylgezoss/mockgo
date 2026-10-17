@@ -223,7 +223,7 @@ class MainActivity : AppCompatActivity() {
         // 版本号（每次升级都在 app/build.gradle.kts 里调高）
         val ver = try { packageManager.getPackageInfo(packageName, 0).versionName } catch (_: Exception) { "" }
         root.addView(TextView(this).apply {
-            text = "v$ver"
+            text = "v$ver  ${Build.MANUFACTURER} ${Build.MODEL}  Android ${Build.VERSION.RELEASE}"
             textSize = 11f
             setTextColor(Color.WHITE)
             setBackgroundColor(0x88000000.toInt())

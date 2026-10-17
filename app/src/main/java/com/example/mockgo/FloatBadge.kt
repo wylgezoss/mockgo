@@ -94,6 +94,8 @@ class FloatBadge(private val ctx: Context) {
         }
     }
 
+    fun setText(s: String) { view?.text = s }
+
     fun hide() {
         val v = view ?: return
         view = null

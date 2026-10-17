@@ -53,6 +53,9 @@ class MockLocationService : Service() {
         @Volatile var lastLeak = ""
     }
 
+    private var lastPushForRate = 0L
+    private var lastRateTime = 0L
+
     private lateinit var lm: LocationManager
     private val main = Handler(Looper.getMainLooper())
     private var thread: HandlerThread? = null
@@ -267,13 +270,32 @@ class MockLocationService : Service() {
     @android.annotation.SuppressLint("MissingPermission")
     private fun watchdog() {
         var bad: String? = null
-        for (p in arrayOf(GPS, NET)) {
-            val l = try { lm.getLastKnownLocation(p) } catch (_: Exception) { null } ?: continue
-            if (!isMock(l)) { bad = "$p 变为真实位置"; break }
+        val sb = StringBuilder()
+        for (p in allProviders()) {
+            val label = when (p) { GPS -> "GPS"; NET -> "网络"; else -> "融合" }
+            val l = try { lm.getLastKnownLocation(p) } catch (_: Exception) { null }
+            if (l == null) { sb.append("$label:无 "); continue }
+            if (!isMock(l)) {
+                sb.append("$label:真实✗ ")
+                if (bad == null && p != FUSED) bad = "$p 变为真实位置"
+                continue
+            }
             val res = FloatArray(1)
             Location.distanceBetween(l.latitude, l.longitude, lat, lng, res)
-            if (res[0] > 30f) { bad = "$p 偏离 ${res[0].toInt()} 米"; break }
+            if (res[0] > 30f) {
+                sb.append("$label:偏${res[0].toInt()}m✗ ")
+                if (bad == null && p != FUSED) bad = "$p 偏离 ${res[0].toInt()} 米"
+            } else {
+                sb.append("$label:模拟✓ ")
+            }
         }
+        // 悬浮框里显示：推送速率 + 各来源状态（切到后台时也能看到系统此刻认为的位置）
+        val nowT = SystemClock.elapsedRealtime()
+        val rate = if (lastRateTime > 0 && nowT > lastRateTime) (pushCount - lastPushForRate) * 1000 / (nowT - lastRateTime) else 0
+        lastPushForRate = pushCount
+        lastRateTime = nowT
+        val text = "● 模拟中  推送${rate}/秒  拉回${leakCount}\n" + sb.toString().trim()
+        main.post { badge?.setText(text) }
         if (bad != null) {
             leakCount++
             lastLeak = bad
@@ -366,7 +388,6 @@ class MockLocationService : Service() {
             .addAction(0, "停止", stop)
             .setOngoing(true)
             .build()
-        val type = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) ServiceInfo.FOREGROUND_SERVICE_TYPE_LOCATION else 0
-        ServiceCompat.startForeground(this, 1, n, type)
+        startForeground(1, n) // 与可用的同类软件一致：不声明前台服务类型
     }
 }
